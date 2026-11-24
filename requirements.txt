@@ -1,0 +1,5 @@
+duckdb==2.0.1
+sentence-transformers==6.3.0
+torch==2.15.0
+anthropic==2.13.0
+mcp==2.3.0

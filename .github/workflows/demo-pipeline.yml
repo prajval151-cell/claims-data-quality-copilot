@@ -1,0 +1,82 @@
+# Runs the full verified pipeline (90,000 synthetic payments -> SQLite -> DuckDB ->
+# anomaly detection -> runbook RAG -> mock investigation agent) on a clean Windows runner.
+# Everything generated lives in a temporary work directory outside the checkout and is
+# deleted at the end; nothing is uploaded. Logs and the job summary show aggregates only.
+name: Demo pipeline
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      run_live:
+        description: "Also run the LIVE Claude API verification (uses the ANTHROPIC_API_KEY secret; billed)"
+        type: boolean
+        default: false
+  # Scheduled run: enable only after a push or manual run has completed green on a clean
+  # runner (see README, "Automation status"). Weekly, Monday 03:17 UTC:
+  # schedule:
+  #   - cron: "17 3 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: demo-pipeline-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pipeline:
+    name: Full pipeline (mock agent)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.15
+        id: py
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.15"
+
+      - name: Choose work directory outside the checkout
+        run: |
+          $work = Join-Path $env:RUNNER_TEMP "claims-copilot-work"
+          $pip = Join-Path $env:RUNNER_TEMP "pip-cache"
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "CLAIMS_CI_WORK_DIR=$work`nCLAIMS_CI_PIP_CACHE=$pip`n")
+          Write-Host "Checkout : $env:GITHUB_WORKSPACE"
+          Write-Host "Work dir : $work"
+
+      # Caches downloaded wheels only (not generated data); lives outside the work directory.
+      - name: Cache pip downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}\pip-cache
+          key: pip-${{ runner.os }}-py315-${{ hashFiles('requirements.txt') }}
+
+      - name: Run pipeline
+        env:
+          BASE_PYTHON: ${{ steps.py.outputs.python-path }}
+          # Only a manual run with run_live=true receives the key; pushes and PRs never call the API.
+          ANTHROPIC_API_KEY: ${{ inputs.run_live && secrets.ANTHROPIC_API_KEY || '' }}
+        run: |
+          $pipelineArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts\ci_pipeline.ps1",
+                            "-WorkDir", $env:CLAIMS_CI_WORK_DIR, "-BasePython", $env:BASE_PYTHON,
+                            "-PipCacheDir", $env:CLAIMS_CI_PIP_CACHE)
+          if ($env:ANTHROPIC_API_KEY) { $pipelineArgs += "-RunLive" }
+          & powershell @pipelineArgs
+          exit $LASTEXITCODE
+
+      - name: Remove work directory
+        if: always()
+        run: |
+          if ($env:CLAIMS_CI_WORK_DIR -and (Test-Path $env:CLAIMS_CI_WORK_DIR)) {
+            Remove-Item -Recurse -Force $env:CLAIMS_CI_WORK_DIR
+          }
+          Write-Host "Work directory removed; no generated files were uploaded."

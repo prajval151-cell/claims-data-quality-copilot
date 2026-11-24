@@ -221,3 +221,29 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Claims Data Quality Copilot: generated data (backup guard; generated
+# files are written to $CLAIMS_WORK_DIR outside this repository)
+claims-copilot-work/
+source/payments/
+payments_*.csv
+policies.csv
+claims.csv
+source/manifest.json
+validation/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.db.tmp
+*.sqlite
+*.sqlite3
+*.sqlite3-journal
+*.duckdb
+*.duckdb.wal
+*.duckdb.tmp/
+warehouse/
+reports/
+incidents/
+simulations/
+rag/

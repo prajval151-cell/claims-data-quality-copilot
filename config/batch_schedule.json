@@ -1,0 +1,9 @@
+{
+  "description": "Expected daily claim-payment batch schedule used by detect_anomalies.py",
+  "first_batch_date": "2026-01-01",
+  "frequency_days": 1,
+  "batch_id_format": "BATCH-%Y%m%d",
+  "expected_rows_per_batch": 1500,
+  "arrival_lag_days": 0,
+  "freshness_grace_days": 0
+}
