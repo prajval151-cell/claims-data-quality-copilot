@@ -47,6 +47,17 @@ $ErrorActionPreference = "Stop"
 $Repo = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $InCI = $env:GITHUB_ACTIONS -eq "true"
 $Results = New-Object System.Collections.Generic.List[object]
+$TailLines = 30          # lines of a failing step's output included in its failure annotation
+$script:Annotated = $false
+
+trap {
+    # Errors outside Invoke-Step (work-directory or git checks) still get an annotation.
+    if (-not $script:Annotated) {
+        $script:Annotated = $true
+        Write-FailureAnnotation "ci_pipeline.ps1 stopped" ($_.ToString() + "`n" + $_.InvocationInfo.PositionMessage)
+    }
+    break
+}
 
 function Write-Section([string]$Text) {
     if ($InCI) { Write-Host "::group::$Text" } else { Write-Host ""; Write-Host "=== $Text ===" }
@@ -57,15 +68,47 @@ function Invoke-Step {
     param([string]$Name, [string]$Exe, [string[]]$Arguments, [int[]]$OkCodes = @(0))
     Write-Section $Name
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    & $Exe @Arguments | Out-Host  # to the console/log, not into this function's return value
-    $code = $LASTEXITCODE
+    # Stream stdout and stderr to the log line by line and keep the last lines for a failure report.
+    # 2>&1 turns stderr lines into ErrorRecords in Windows PowerShell 5.1, which would stop the script
+    # under $ErrorActionPreference = 'Stop', so it is relaxed for this command only.
+    $tail = New-Object System.Collections.Generic.Queue[string]
+    $savedPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $Exe @Arguments 2>&1 | ForEach-Object {
+            $line = if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { [string]$_ }
+            Write-Host $line
+            $tail.Enqueue($line)
+            if ($tail.Count -gt $TailLines) { [void]$tail.Dequeue() }
+        }
+        $code = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $savedPreference
+    }
     $sw.Stop()
     Close-Section
     $ok = $OkCodes -contains $code
     $Results.Add([pscustomobject]@{ Step = $Name; ExitCode = $code; Seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1); Ok = $ok })
     Write-Host ("[{0}] {1} (exit {2}, {3:N1}s)" -f ($(if ($ok) { "PASS" } else { "FAIL" })), $Name, $code, $sw.Elapsed.TotalSeconds)
-    if (-not $ok) { throw "Step '$Name' failed with exit code $code (expected $($OkCodes -join ' or '))" }
+    if (-not $ok) {
+        $script:Annotated = $true
+        Write-FailureAnnotation "Step failed: $Name (exit $code)" (@($tail) -join "`n")
+        throw "Step '$Name' failed with exit code $code (expected $($OkCodes -join ' or '))"
+    }
     return $code
+}
+
+function Write-FailureAnnotation([string]$Title, [string]$Body) {
+    # GitHub shows ::error lines as annotations on the run summary page. Outside CI, print a marked block.
+    if ($InCI) {
+        $esc = { param($s) $s.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A') }
+        $t = (& $esc $Title).Replace(':', '%3A').Replace(',', '%2C')
+        Write-Host ("::error title={0}::{1}" -f $t, (& $esc $Body))
+    } else {
+        Write-Host "----- FAILURE REPORT: $Title -----"
+        Write-Host $Body
+        Write-Host "----- END FAILURE REPORT -----"
+    }
 }
 
 function Get-RepoState {
@@ -102,7 +145,9 @@ Write-Host "Work dir   : $WorkFull"
 Write-Host "Pip cache  : $PipCacheDir"
 Write-Host ("Live API   : {0}" -f $(if ($RunLive -and $env:ANTHROPIC_API_KEY) { "key provided" } else { "no key (live verification will be PENDING)" }))
 
-$RepoBefore = Get-RepoState
+# @(...) at the call site: a function returning an empty array yields $null in PowerShell, and a
+# clean checkout (as on a CI runner) has an empty status list.
+$RepoBefore = @(Get-RepoState)
 Push-Location $Repo
 try {
     # ------------------------------------------------------------ environment
@@ -157,8 +202,8 @@ try {
     if ($live -eq 3) { Write-Host "LIVE Claude API verification: PENDING (no ANTHROPIC_API_KEY for this run)" }
 
     # ------------------------------------------------------------ repository hygiene and summary
-    $RepoAfter = Get-RepoState
-    $added = @(Compare-Object -ReferenceObject $RepoBefore -DifferenceObject $RepoAfter | Where-Object SideIndicator -eq "=>" | ForEach-Object InputObject)
+    $RepoAfter = @(Get-RepoState)
+    $added = @($RepoAfter | Where-Object { $RepoBefore -notcontains $_ })  # works when either list is empty
     Write-Section "Git checkout unchanged by the run"
     if ($added.Count) { $added | ForEach-Object { Write-Host "  new in checkout: $_" } }
     Close-Section
